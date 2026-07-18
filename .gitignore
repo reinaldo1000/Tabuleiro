@@ -1,0 +1,21 @@
+@'
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# PyInstaller
+build/
+dist/
+
+# Executaveis e instaladores gerados
+instalador/*.exe
+
+# Arquivos temporarios
+*.log
+*.tmp
+'@ | Set-Content -Encoding utf8 .gitignore
