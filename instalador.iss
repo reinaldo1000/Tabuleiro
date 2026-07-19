@@ -1,5 +1,5 @@
 #define MeuProgramaNome "Tabuleiro"
-#define MeuProgramaVersao "1.0.0"
+#define MeuProgramaVersao "1.1.0"
 #define MeuProgramaEmpresa "Reinaldo"
 #define MeuProgramaExe "Tabuleiro.exe"
 

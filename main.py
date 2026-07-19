@@ -3,32 +3,39 @@ from pathlib import Path
 
 import chess
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
-    QInputDialog,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
     QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
 
-# Funciona tanto no Python quanto no executável criado pelo PyInstaller.
+# ============================================================
+# CAMINHOS
+# ============================================================
+
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys._MEIPASS)
 else:
     BASE_DIR = Path(__file__).resolve().parent
 
 PIECES_DIR = BASE_DIR / "pieces"
-
-BOARD_SIZE = 800
-CONTROL_HEIGHT = 50
-WINDOW_HEIGHT = BOARD_SIZE + CONTROL_HEIGHT
-SQUARE_SIZE = BOARD_SIZE // 8
+PIECES2_DIR = BASE_DIR / "pieces2"
 
 
-PIECE_FILES = {
+# ============================================================
+# ARQUIVOS DAS PEÇAS
+# ============================================================
+
+PECAS_ESTILO_1 = {
     "P": "white_pawn.svg",
     "N": "white_knight.svg",
     "B": "white_bishop.svg",
@@ -43,490 +50,827 @@ PIECE_FILES = {
     "k": "black_king.svg",
 }
 
+PECAS_ESTILO_2 = {
+    "P": "wp.png",
+    "N": "wn.png",
+    "B": "wb.png",
+    "R": "wr.png",
+    "Q": "wq.png",
+    "K": "wk.png",
+    "p": "bp.png",
+    "n": "bn.png",
+    "b": "bb.png",
+    "r": "br.png",
+    "q": "bq.png",
+    "k": "bk.png",
+}
 
-class Tabuleiro(QWidget):
 
-    def __init__(self):
-        super().__init__()
+# ============================================================
+# JANELA DE PROMOÇÃO
+# ============================================================
 
-        self.setWindowTitle("Tabuleiro de Xadrez")
-        self.setFixedSize(BOARD_SIZE, WINDOW_HEIGHT)
+class DialogoPromocao(QDialog):
+
+    def __init__(self, cor_branca: bool, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Promoção")
+        self.setModal(True)
+        self.peca_escolhida = chess.QUEEN
+
+        layout = QVBoxLayout(self)
+
+        texto = QLabel("Escolha a peça para promoção:")
+        layout.addWidget(texto)
+
+        nomes = [
+            ("Dama", chess.QUEEN),
+            ("Torre", chess.ROOK),
+            ("Bispo", chess.BISHOP),
+            ("Cavalo", chess.KNIGHT),
+        ]
+
+        for nome, tipo_peca in nomes:
+            botao = QPushButton(nome)
+            botao.clicked.connect(
+                lambda marcado=False, peca=tipo_peca: self.escolher(peca)
+            )
+            layout.addWidget(botao)
+
+        self.resize(250, 220)
+
+    def escolher(self, tipo_peca):
+        self.peca_escolhida = tipo_peca
+        self.accept()
+
+
+# ============================================================
+# WIDGET DO TABULEIRO
+# ============================================================
+
+class TabuleiroWidget(QWidget):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
 
         self.board = chess.Board()
 
+        self.tabuleiro_invertido = False
+        self.estilo_visual = 1
+
         self.casa_selecionada = None
-        self.destinos_legais = []
         self.ultimo_movimento = None
 
-        self.tabuleiro_invertido = False
-
-        # Controle do arraste.
         self.arrastando = False
-        self.origem_arraste = None
-        self.posicao_mouse = QPointF()
-        self.posicao_inicial_mouse = QPointF()
-        self.movimento_mouse_ocorreu = False
+        self.origem_arrasto = None
+        self.posicao_mouse = QPoint()
+        self.posicao_clique = QPoint()
 
-        # Cores definitivas do tabuleiro.
-        self.cor_clara = QColor(255, 255, 221)
-        self.cor_escura = QColor(134, 166, 102)
+        self.tamanho_tabuleiro = 800
+        self.setFixedSize(
+            self.tamanho_tabuleiro,
+            self.tamanho_tabuleiro,
+        )
+
+        self.setMouseTracking(True)
 
         self.svg_renderers = {}
+        self.pixmaps_estilo_2 = {}
 
         self.carregar_pecas()
-        self.criar_controles()
+
+        self.imagem_tabuleiro_2 = QPixmap(
+            str(PIECES2_DIR / "tabuleiro.png")
+        )
+
+    # ========================================================
+    # CARREGAMENTO DAS IMAGENS
+    # ========================================================
 
     def carregar_pecas(self):
-        for simbolo, nome_arquivo in PIECE_FILES.items():
-            caminho = PIECES_DIR / nome_arquivo
 
-            if not caminho.exists():
-                raise FileNotFoundError(
-                    f"Arquivo não encontrado: {caminho}"
+        self.svg_renderers.clear()
+        self.pixmaps_estilo_2.clear()
+
+        for simbolo, arquivo in PECAS_ESTILO_1.items():
+
+            caminho = PIECES_DIR / arquivo
+
+            if caminho.exists():
+                self.svg_renderers[simbolo] = QSvgRenderer(
+                    str(caminho)
                 )
 
-            renderer = QSvgRenderer(str(caminho))
+        for simbolo, arquivo in PECAS_ESTILO_2.items():
 
-            if not renderer.isValid():
-                raise RuntimeError(
-                    f"SVG inválido ou não carregado: {caminho}"
+            caminho = PIECES2_DIR / arquivo
+
+            if caminho.exists():
+                self.pixmaps_estilo_2[simbolo] = QPixmap(
+                    str(caminho)
                 )
 
-            self.svg_renderers[simbolo] = renderer
+    # ========================================================
+    # TAMANHOS E COORDENADAS
+    # ========================================================
 
-    def criar_controles(self):
-        self.botao_inverter = QPushButton(
-            "Inverter tabuleiro",
-            self,
-        )
+    def tamanho_casa(self):
+        return self.width() / 8
 
-        self.botao_inverter.setGeometry(
-            10,
-            BOARD_SIZE + 7,
-            180,
-            36,
-        )
+    def casa_para_tela(self, square):
 
-        self.botao_inverter.clicked.connect(
-            self.inverter_tabuleiro
-        )
-
-    def inverter_tabuleiro(self):
-        self.tabuleiro_invertido = not self.tabuleiro_invertido
-
-        self.arrastando = False
-        self.origem_arraste = None
-        self.movimento_mouse_ocorreu = False
-        self.limpar_selecao()
+        arquivo = chess.square_file(square)
+        linha = chess.square_rank(square)
 
         if self.tabuleiro_invertido:
-            self.botao_inverter.setText("Visão das brancas")
+            coluna_tela = 7 - arquivo
+            linha_tela = linha
         else:
-            self.botao_inverter.setText("Visão das pretas")
+            coluna_tela = arquivo
+            linha_tela = 7 - linha
 
-        self.update()
+        tamanho = self.tamanho_casa()
+
+        x = coluna_tela * tamanho
+        y = linha_tela * tamanho
+
+        return x, y
+
+    def tela_para_casa(self, ponto):
+
+        tamanho = self.tamanho_casa()
+
+        coluna_tela = int(ponto.x() / tamanho)
+        linha_tela = int(ponto.y() / tamanho)
+
+        if not 0 <= coluna_tela < 8:
+            return None
+
+        if not 0 <= linha_tela < 8:
+            return None
+
+        if self.tabuleiro_invertido:
+            arquivo = 7 - coluna_tela
+            linha = linha_tela
+        else:
+            arquivo = coluna_tela
+            linha = 7 - linha_tela
+
+        return chess.square(arquivo, linha)
+
+    # ========================================================
+    # DESENHO
+    # ========================================================
 
     def paintEvent(self, event):
-        painter = QPainter(self)
 
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
-        self.desenhar_casas(painter)
-        self.destacar_ultima_jogada(painter)
-        self.destacar_selecao(painter)
-        self.desenhar_destinos_legais(painter)
+        self.desenhar_tabuleiro(painter)
+        self.desenhar_ultimo_movimento(painter)
+        self.desenhar_casa_selecionada(painter)
+        self.desenhar_movimentos_legais(painter)
         self.desenhar_pecas(painter)
         self.desenhar_peca_arrastada(painter)
+        self.desenhar_coordenadas(painter)
 
-    def desenhar_casas(self, painter):
+    def desenhar_tabuleiro(self, painter):
+
+        if (
+            self.estilo_visual == 2
+            and not self.imagem_tabuleiro_2.isNull()
+        ):
+            painter.drawPixmap(
+                self.rect(),
+                self.imagem_tabuleiro_2,
+            )
+            return
+
+        cor_clara = QColor(255, 255, 221)
+        cor_escura = QColor(134, 166, 102)
+
+        tamanho = self.tamanho_casa()
+
         for linha in range(8):
             for coluna in range(8):
+
                 cor = (
-                    self.cor_clara
+                    cor_clara
                     if (linha + coluna) % 2 == 0
-                    else self.cor_escura
+                    else cor_escura
                 )
 
-                x = coluna * SQUARE_SIZE
-                y = linha * SQUARE_SIZE
-
                 painter.fillRect(
-                    x,
-                    y,
-                    SQUARE_SIZE,
-                    SQUARE_SIZE,
+                    QRectF(
+                        coluna * tamanho,
+                        linha * tamanho,
+                        tamanho,
+                        tamanho,
+                    ),
                     cor,
                 )
 
-    def desenhar_pecas(self, painter):
-        margem = 8
+    def desenhar_ultimo_movimento(self, painter):
 
-        for square in chess.SQUARES:
-            if self.arrastando and square == self.origem_arraste:
-                continue
-
-            piece = self.board.piece_at(square)
-
-            if piece is None:
-                continue
-
-            renderer = self.svg_renderers[piece.symbol()]
-
-            coluna, linha = self.casa_para_tela(square)
-
-            x = coluna * SQUARE_SIZE
-            y = linha * SQUARE_SIZE
-
-            area = QRectF(
-                x + margem,
-                y + margem,
-                SQUARE_SIZE - margem * 2,
-                SQUARE_SIZE - margem * 2,
-            )
-
-            renderer.render(painter, area)
-
-    def desenhar_peca_arrastada(self, painter):
-        if not self.arrastando or self.origem_arraste is None:
+        if self.ultimo_movimento is None:
             return
 
-        piece = self.board.piece_at(self.origem_arraste)
+        cor = QColor(255, 230, 0, 100)
+        tamanho = self.tamanho_casa()
+
+        for square in [
+            self.ultimo_movimento.from_square,
+            self.ultimo_movimento.to_square,
+        ]:
+            x, y = self.casa_para_tela(square)
+
+            painter.fillRect(
+                QRectF(x, y, tamanho, tamanho),
+                cor,
+            )
+
+    def desenhar_casa_selecionada(self, painter):
+
+        if self.casa_selecionada is None:
+            return
+
+        x, y = self.casa_para_tela(
+            self.casa_selecionada
+        )
+
+        tamanho = self.tamanho_casa()
+
+        painter.fillRect(
+            QRectF(x, y, tamanho, tamanho),
+            QColor(255, 255, 0, 100),
+        )
+
+        caneta = QPen(QColor(255, 215, 0))
+        caneta.setWidth(4)
+
+        painter.setPen(caneta)
+        painter.drawRect(
+            QRectF(
+                x + 2,
+                y + 2,
+                tamanho - 4,
+                tamanho - 4,
+            )
+        )
+
+    def desenhar_movimentos_legais(self, painter):
+
+        if self.casa_selecionada is None:
+            return
+
+        tamanho = self.tamanho_casa()
+
+        movimentos = [
+            movimento
+            for movimento in self.board.legal_moves
+            if movimento.from_square == self.casa_selecionada
+        ]
+
+        painter.setPen(Qt.NoPen)
+
+        for movimento in movimentos:
+
+            x, y = self.casa_para_tela(
+                movimento.to_square
+            )
+
+            destino_ocupado = (
+                self.board.piece_at(
+                    movimento.to_square
+                )
+                is not None
+            )
+
+            if destino_ocupado:
+
+                caneta = QPen(
+                    QColor(40, 40, 40, 140)
+                )
+                caneta.setWidth(7)
+
+                painter.setPen(caneta)
+                painter.setBrush(Qt.NoBrush)
+
+                painter.drawEllipse(
+                    QRectF(
+                        x + 8,
+                        y + 8,
+                        tamanho - 16,
+                        tamanho - 16,
+                    )
+                )
+
+                painter.setPen(Qt.NoPen)
+
+            else:
+
+                painter.setBrush(
+                    QColor(40, 40, 40, 120)
+                )
+
+                raio = tamanho * 0.14
+
+                painter.drawEllipse(
+                    QRectF(
+                        x + tamanho / 2 - raio,
+                        y + tamanho / 2 - raio,
+                        raio * 2,
+                        raio * 2,
+                    )
+                )
+
+    def desenhar_pecas(self, painter):
+
+        tamanho = self.tamanho_casa()
+
+        for square, piece in self.board.piece_map().items():
+
+            if (
+                self.arrastando
+                and square == self.origem_arrasto
+            ):
+                continue
+
+            simbolo = piece.symbol()
+
+            x, y = self.casa_para_tela(square)
+
+            margem = tamanho * 0.06
+
+            retangulo = QRectF(
+                x + margem,
+                y + margem,
+                tamanho - margem * 2,
+                tamanho - margem * 2,
+            )
+
+            self.desenhar_uma_peca(
+                painter,
+                simbolo,
+                retangulo,
+            )
+
+    def desenhar_uma_peca(
+        self,
+        painter,
+        simbolo,
+        retangulo,
+    ):
+
+        if self.estilo_visual == 1:
+
+            renderer = self.svg_renderers.get(simbolo)
+
+            if renderer is not None:
+                renderer.render(
+                    painter,
+                    retangulo,
+                )
+
+        else:
+
+            pixmap = self.pixmaps_estilo_2.get(
+                simbolo
+            )
+
+            if pixmap is not None and not pixmap.isNull():
+
+                painter.drawPixmap(
+                    retangulo.toRect(),
+                    pixmap,
+                )
+
+    def desenhar_peca_arrastada(self, painter):
+
+        if not self.arrastando:
+            return
+
+        if self.origem_arrasto is None:
+            return
+
+        piece = self.board.piece_at(
+            self.origem_arrasto
+        )
 
         if piece is None:
             return
 
-        renderer = self.svg_renderers[piece.symbol()]
+        tamanho = self.tamanho_casa()
 
-        tamanho = SQUARE_SIZE - 10
-
-        x = self.posicao_mouse.x() - tamanho / 2
-        y = self.posicao_mouse.y() - tamanho / 2
-
-        area = QRectF(
-            x,
-            y,
+        retangulo = QRectF(
+            self.posicao_mouse.x() - tamanho / 2,
+            self.posicao_mouse.y() - tamanho / 2,
             tamanho,
             tamanho,
         )
 
-        renderer.render(painter, area)
+        painter.setOpacity(0.85)
 
-    def destacar_selecao(self, painter):
-        if self.casa_selecionada is None:
-            return
-
-        coluna, linha = self.casa_para_tela(
-            self.casa_selecionada
+        self.desenhar_uma_peca(
+            painter,
+            piece.symbol(),
+            retangulo,
         )
 
-        x = coluna * SQUARE_SIZE
-        y = linha * SQUARE_SIZE
+        painter.setOpacity(1.0)
 
-        painter.fillRect(
-            x,
-            y,
-            SQUARE_SIZE,
-            SQUARE_SIZE,
-            QColor(255, 255, 0, 90),
-        )
+    def desenhar_coordenadas(self, painter):
 
-        painter.setPen(
-            QPen(
-                QColor(255, 215, 0),
-                4,
-            )
-        )
+        tamanho = self.tamanho_casa()
 
-        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor(30, 30, 30, 190))
 
-        painter.drawRect(
-            x + 2,
-            y + 2,
-            SQUARE_SIZE - 4,
-            SQUARE_SIZE - 4,
-        )
+        fonte = painter.font()
+        fonte.setBold(True)
+        fonte.setPointSize(9)
+        painter.setFont(fonte)
 
-    def desenhar_destinos_legais(self, painter):
-        for destino in self.destinos_legais:
-            coluna, linha = self.casa_para_tela(destino)
+        for coluna in range(8):
 
-            x = coluna * SQUARE_SIZE
-            y = linha * SQUARE_SIZE
-
-            existe_peca = self.board.piece_at(destino)
-
-            if existe_peca is not None:
-                painter.setPen(
-                    QPen(
-                        QColor(20, 20, 20, 130),
-                        7,
-                    )
-                )
-
-                painter.setBrush(Qt.NoBrush)
-
-                painter.drawEllipse(
-                    x + 8,
-                    y + 8,
-                    SQUARE_SIZE - 16,
-                    SQUARE_SIZE - 16,
-                )
+            if self.tabuleiro_invertido:
+                letra = chr(ord("h") - coluna)
             else:
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(
-                    QColor(20, 20, 20, 110)
-                )
+                letra = chr(ord("a") + coluna)
 
-                tamanho = SQUARE_SIZE // 4
-
-                painter.drawEllipse(
-                    x + (SQUARE_SIZE - tamanho) // 2,
-                    y + (SQUARE_SIZE - tamanho) // 2,
-                    tamanho,
-                    tamanho,
-                )
-
-    def destacar_ultima_jogada(self, painter):
-        if self.ultimo_movimento is None:
-            return
-
-        casas = [
-            self.ultimo_movimento.from_square,
-            self.ultimo_movimento.to_square,
-        ]
-
-        for square in casas:
-            coluna, linha = self.casa_para_tela(square)
-
-            x = coluna * SQUARE_SIZE
-            y = linha * SQUARE_SIZE
-
-            painter.fillRect(
-                x,
-                y,
-                SQUARE_SIZE,
-                SQUARE_SIZE,
-                QColor(120, 180, 70, 100),
+            painter.drawText(
+                int(coluna * tamanho + 5),
+                int(self.height() - 6),
+                letra,
             )
 
-    def mousePressEvent(self, event):
+        for linha in range(8):
+
+            if self.tabuleiro_invertido:
+                numero = str(linha + 1)
+            else:
+                numero = str(8 - linha)
+
+            painter.drawText(
+                int(self.width() - 14),
+                int(linha * tamanho + 15),
+                numero,
+            )
+
+    # ========================================================
+    # CLIQUES E ARRASTE
+    # ========================================================
+
+    def mousePressEvent(self, event: QMouseEvent):
+
         if event.button() != Qt.LeftButton:
             return
 
-        square = self.posicao_para_casa(event.position())
+        square = self.tela_para_casa(
+            event.position().toPoint()
+        )
 
         if square is None:
             return
 
-        piece = self.board.piece_at(square)
+        self.posicao_clique = event.position().toPoint()
+        self.posicao_mouse = event.position().toPoint()
 
-        self.posicao_inicial_mouse = event.position()
-        self.posicao_mouse = event.position()
-        self.movimento_mouse_ocorreu = False
+        piece = self.board.piece_at(square)
 
         if (
             piece is not None
             and piece.color == self.board.turn
         ):
-            self.arrastando = True
-            self.origem_arraste = square
-            self.selecionar_casa(square)
+            self.origem_arrasto = square
+        else:
+            self.origem_arrasto = None
 
-        self.update()
+        self.arrastando = False
 
-    def mouseMoveEvent(self, event):
-        if not self.arrastando:
+    def mouseMoveEvent(self, event: QMouseEvent):
+
+        self.posicao_mouse = event.position().toPoint()
+
+        if self.origem_arrasto is None:
             return
 
-        self.posicao_mouse = event.position()
-
         distancia = (
-            self.posicao_mouse - self.posicao_inicial_mouse
+            self.posicao_mouse
+            - self.posicao_clique
         ).manhattanLength()
 
-        if distancia > 5:
-            self.movimento_mouse_ocorreu = True
+        if distancia > 8:
+            self.arrastando = True
+            self.casa_selecionada = (
+                self.origem_arrasto
+            )
+            self.update()
 
-        self.update()
+    def mouseReleaseEvent(self, event: QMouseEvent):
 
-    def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
 
-        destino = self.posicao_para_casa(event.position())
+        square_destino = self.tela_para_casa(
+            event.position().toPoint()
+        )
 
-        origem = self.origem_arraste
-        houve_arraste = self.movimento_mouse_ocorreu
+        if self.arrastando:
 
-        self.arrastando = False
-        self.origem_arraste = None
-        self.movimento_mouse_ocorreu = False
+            origem = self.origem_arrasto
 
-        if origem is None:
+            self.arrastando = False
+            self.origem_arrasto = None
+
+            if (
+                origem is not None
+                and square_destino is not None
+            ):
+                self.tentar_movimento(
+                    origem,
+                    square_destino,
+                )
+
             self.update()
             return
 
-        if destino is None:
-            self.limpar_selecao()
-            self.update()
-            return
+        self.origem_arrasto = None
 
-        if houve_arraste:
-            self.casa_selecionada = origem
-            self.tentar_movimento(destino)
-        else:
-            if destino == origem:
-                self.selecionar_casa(origem)
-            elif self.casa_selecionada is not None:
-                self.tentar_movimento(destino)
+        if square_destino is not None:
+            self.processar_clique(
+                square_destino
+            )
 
         self.update()
 
-    def selecionar_casa(self, square):
+    def processar_clique(self, square):
+
         piece = self.board.piece_at(square)
 
-        if piece is None:
-            self.limpar_selecao()
+        if self.casa_selecionada is None:
+
+            if (
+                piece is not None
+                and piece.color == self.board.turn
+            ):
+                self.casa_selecionada = square
+
             return
 
-        if piece.color != self.board.turn:
-            self.limpar_selecao()
+        if square == self.casa_selecionada:
+            self.casa_selecionada = None
             return
 
-        self.casa_selecionada = square
+        if (
+            piece is not None
+            and piece.color == self.board.turn
+        ):
+            self.casa_selecionada = square
+            return
 
-        self.destinos_legais = [
-            movimento.to_square
-            for movimento in self.board.legal_moves
-            if movimento.from_square == square
-        ]
-
-    def escolher_promocao(self):
-        opcoes = [
-            "Dama",
-            "Torre",
-            "Bispo",
-            "Cavalo",
-        ]
-
-        escolha, confirmado = QInputDialog.getItem(
-            self,
-            "Promoção do peão",
-            "Escolha a nova peça:",
-            opcoes,
-            0,
-            False,
-        )
-
-        if not confirmado:
-            return None
-
-        promocoes = {
-            "Dama": chess.QUEEN,
-            "Torre": chess.ROOK,
-            "Bispo": chess.BISHOP,
-            "Cavalo": chess.KNIGHT,
-        }
-
-        return promocoes[escolha]
-
-    def tentar_movimento(self, destino):
         origem = self.casa_selecionada
 
-        if origem is None:
-            return
+        if self.tentar_movimento(origem, square):
+            self.casa_selecionada = None
 
-        piece_destino = self.board.piece_at(destino)
+    # ========================================================
+    # MOVIMENTOS
+    # ========================================================
 
-        if (
-            piece_destino is not None
-            and piece_destino.color == self.board.turn
-        ):
-            self.selecionar_casa(destino)
-            return
+    def tentar_movimento(
+        self,
+        origem,
+        destino,
+    ):
 
-        piece_origem = self.board.piece_at(origem)
+        piece = self.board.piece_at(origem)
 
-        if piece_origem is None:
-            self.limpar_selecao()
-            return
+        if piece is None:
+            return False
 
-        movimento = chess.Move(origem, destino)
+        promocao = None
 
-        if (
-            piece_origem.piece_type == chess.PAWN
-            and chess.square_rank(destino) in (0, 7)
-        ):
-            promocao = self.escolher_promocao()
+        if piece.piece_type == chess.PAWN:
 
-            if promocao is None:
-                return
+            rank_destino = chess.square_rank(destino)
 
-            movimento = chess.Move(
-                origem,
-                destino,
-                promotion=promocao,
-            )
+            if rank_destino in [0, 7]:
 
-        if movimento in self.board.legal_moves:
-            self.board.push(movimento)
-            self.ultimo_movimento = movimento
+                dialogo = DialogoPromocao(
+                    piece.color == chess.WHITE,
+                    self,
+                )
 
-            print(
-                f"Movimento: {movimento.uci()} | "
-                f"FEN: {self.board.fen()}"
-            )
+                if dialogo.exec() != QDialog.Accepted:
+                    return False
 
-        self.limpar_selecao()
+                promocao = dialogo.peca_escolhida
 
-    def limpar_selecao(self):
-        self.casa_selecionada = None
-        self.destinos_legais = []
-
-    def posicao_para_casa(self, posicao):
-        if posicao.y() >= BOARD_SIZE:
-            return None
-
-        coluna = int(posicao.x() // SQUARE_SIZE)
-        linha = int(posicao.y() // SQUARE_SIZE)
-
-        if not 0 <= coluna < 8 or not 0 <= linha < 8:
-            return None
-
-        return self.tela_para_casa(coluna, linha)
-
-    def casa_para_tela(self, square):
-        coluna = chess.square_file(square)
-        rank = chess.square_rank(square)
-
-        if self.tabuleiro_invertido:
-            coluna_tela = 7 - coluna
-            linha_tela = rank
-        else:
-            coluna_tela = coluna
-            linha_tela = 7 - rank
-
-        return coluna_tela, linha_tela
-
-    def tela_para_casa(self, coluna, linha):
-        if self.tabuleiro_invertido:
-            arquivo = 7 - coluna
-            rank = linha
-        else:
-            arquivo = coluna
-            rank = 7 - linha
-
-        return chess.square(
-            arquivo,
-            rank,
+        movimento = chess.Move(
+            origem,
+            destino,
+            promotion=promocao,
         )
 
+        if movimento not in self.board.legal_moves:
+            return False
 
-if __name__ == "__main__":
+        self.board.push(movimento)
+
+        self.ultimo_movimento = movimento
+        self.casa_selecionada = None
+
+        self.update()
+
+        return True
+
+    # ========================================================
+    # CONTROLES
+    # ========================================================
+
+    def inverter_tabuleiro(self):
+
+        self.tabuleiro_invertido = (
+            not self.tabuleiro_invertido
+        )
+
+        self.update()
+
+    def trocar_visual(self):
+
+        if self.estilo_visual == 1:
+            self.estilo_visual = 2
+        else:
+            self.estilo_visual = 1
+
+        self.update()
+
+    def nova_partida(self):
+
+        self.board.reset()
+
+        self.casa_selecionada = None
+        self.ultimo_movimento = None
+        self.arrastando = False
+        self.origem_arrasto = None
+
+        self.update()
+
+    def desfazer_movimento(self):
+
+        if not self.board.move_stack:
+            return
+
+        self.board.pop()
+
+        if self.board.move_stack:
+            self.ultimo_movimento = (
+                self.board.peek()
+            )
+        else:
+            self.ultimo_movimento = None
+
+        self.casa_selecionada = None
+        self.update()
+
+
+# ============================================================
+# JANELA PRINCIPAL
+# ============================================================
+
+class JanelaPrincipal(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Tabuleiro de Xadrez")
+
+        caminho_icone = PIECES_DIR / "tabuleiro.ico"
+
+        if caminho_icone.exists():
+            self.setWindowIcon(
+                QIcon(str(caminho_icone))
+            )
+
+        widget_central = QWidget()
+        self.setCentralWidget(widget_central)
+
+        layout_principal = QVBoxLayout(
+            widget_central
+        )
+
+        self.tabuleiro = TabuleiroWidget()
+
+        layout_principal.addWidget(
+            self.tabuleiro,
+            alignment=Qt.AlignCenter,
+        )
+
+        layout_botoes = QHBoxLayout()
+
+        self.botao_inverter = QPushButton(
+            "Inverter tabuleiro"
+        )
+
+        self.botao_visual = QPushButton(
+            "Trocar visual"
+        )
+
+        self.botao_desfazer = QPushButton(
+            "Desfazer"
+        )
+
+        self.botao_nova = QPushButton(
+            "Nova partida"
+        )
+
+        self.botao_inverter.clicked.connect(
+            self.tabuleiro.inverter_tabuleiro
+        )
+
+        self.botao_visual.clicked.connect(
+            self.trocar_visual
+        )
+
+        self.botao_desfazer.clicked.connect(
+            self.tabuleiro.desfazer_movimento
+        )
+
+        self.botao_nova.clicked.connect(
+            self.tabuleiro.nova_partida
+        )
+
+        layout_botoes.addWidget(
+            self.botao_inverter
+        )
+
+        layout_botoes.addWidget(
+            self.botao_visual
+        )
+
+        layout_botoes.addWidget(
+            self.botao_desfazer
+        )
+
+        layout_botoes.addWidget(
+            self.botao_nova
+        )
+
+        layout_principal.addLayout(
+            layout_botoes
+        )
+
+        self.label_visual = QLabel(
+            "Visual atual: peças clássicas"
+        )
+
+        self.label_visual.setAlignment(
+            Qt.AlignCenter
+        )
+
+        layout_principal.addWidget(
+            self.label_visual
+        )
+
+        self.setFixedSize(840, 910)
+
+    def trocar_visual(self):
+
+        self.tabuleiro.trocar_visual()
+
+        if self.tabuleiro.estilo_visual == 1:
+            self.label_visual.setText(
+                "Visual atual: peças clássicas"
+            )
+        else:
+            self.label_visual.setText(
+                "Visual atual: peças alternativas"
+            )
+
+
+# ============================================================
+# INÍCIO DO PROGRAMA
+# ============================================================
+
+def main():
+
     app = QApplication(sys.argv)
 
-    janela = Tabuleiro()
+    caminho_icone = PIECES_DIR / "tabuleiro.ico"
+
+    if caminho_icone.exists():
+        app.setWindowIcon(
+            QIcon(str(caminho_icone))
+        )
+
+    janela = JanelaPrincipal()
     janela.show()
 
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
